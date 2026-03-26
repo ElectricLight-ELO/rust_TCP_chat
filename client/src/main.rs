@@ -2,13 +2,17 @@
 fn main() {
 
 
-    let num = 7;
-
-    if num > 5 {
-        println!("> 5");
-    } else if num == 5 {
-        println!("= 5");
-    } else {
-        println!("< 5");
+    let mut i = 0;
+    loop {
+        i += 1;
+        if i == 5 { break; }
     }
+
+    let mut n = 0;
+    while n < 5 {
+        println!("{}", n);
+        n += 1;
+    }
+
+    
 }
