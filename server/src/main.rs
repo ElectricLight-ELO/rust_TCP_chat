@@ -1,16 +1,15 @@
-use std::io::{self, Read, Write};
-use std::net::{TcpListener, TcpStream};
-use std::thread;
+use tokio::io::{self, AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
 
 const CHUNK_SIZE: usize = 1024;
 
-fn read_all(stream: &mut TcpStream) -> io::Result<String> {
+async fn read_all(stream: &mut TcpStream) -> io::Result<String> {
     let peer = stream.peer_addr()?;
 
     // 1. Читаем размер (4 байта, big-endian = network byte order)
     let mut len_buf = [0u8; 4];
-    stream.read_exact(&mut len_buf)?;
-    let data_length = u32::from_be_bytes(len_buf) as usize; // ntohl
+    stream.read_exact(&mut len_buf).await?;
+    let data_length = u32::from_be_bytes(len_buf) as usize;
     println!("  [server] ожидаю {} байт от {}", data_length, peer);
 
     // 2. Читаем данные чанками
@@ -22,8 +21,7 @@ fn read_all(stream: &mut TcpStream) -> io::Result<String> {
         let remaining = data_length - bytes_read;
         let current_chunk = remaining.min(CHUNK_SIZE);
 
-        // read_exact читает ровно current_chunk байт — без недочтений
-        stream.read_exact(&mut buffer[bytes_read..bytes_read + current_chunk])?;
+        stream.read_exact(&mut buffer[bytes_read..bytes_read + current_chunk]).await?;
 
         bytes_read += current_chunk;
         chunk_index += 1;
@@ -36,13 +34,12 @@ fn read_all(stream: &mut TcpStream) -> io::Result<String> {
     Ok(String::from_utf8_lossy(&buffer).to_string())
 }
 
-
-fn send_all(stream: &mut TcpStream, data: &[u8]) -> io::Result<()> {
+async fn send_all(stream: &mut TcpStream, data: &[u8]) -> io::Result<()> {
     let data_length = data.len();
 
     // 1. Отправляем размер (4 байта, big-endian = htonl)
-    let network_length = (data_length as u32).to_be_bytes(); // htonl
-    stream.write_all(&network_length)?;
+    let network_length = (data_length as u32).to_be_bytes();
+    stream.write_all(&network_length).await?;
     println!("  [server] отправляю размер: {} байт", data_length);
 
     // 2. Отправляем данные чанками
@@ -53,8 +50,8 @@ fn send_all(stream: &mut TcpStream, data: &[u8]) -> io::Result<()> {
         let remaining = data_length - bytes_sent;
         let current_chunk = remaining.min(CHUNK_SIZE);
 
-        stream.write_all(&data[bytes_sent..bytes_sent + current_chunk])?;
-        stream.flush()?;
+        stream.write_all(&data[bytes_sent..bytes_sent + current_chunk]).await?;
+        stream.flush().await?;
 
         bytes_sent += current_chunk;
         chunk_index += 1;
@@ -67,20 +64,17 @@ fn send_all(stream: &mut TcpStream, data: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
-fn handle_client(mut stream: TcpStream) {
+async fn handle_client(mut stream: TcpStream) {
     let peer = stream.peer_addr().unwrap();
-    println!("\n[+] Подключился: {} (поток {:?})", peer, thread::current().id());
-    io::stdout().flush().unwrap(); // ← сброс буфера после входа
+    println!("\n[+] Подключился: {} (задача {:?})", peer, tokio::task::id());
 
-    match read_all(&mut stream) {
+    match read_all(&mut stream).await {
         Ok(msg) => {
-            // Явно выводим сообщение и сразу сбрасываем буфер
             println!("  Сообщение от {}:", peer);
             println!("  > {}", msg);
-            io::stdout().flush().unwrap(); // ← вот главный фикс
 
             let ack = format!("OK: получено {} байт", msg.len());
-            if let Err(e) = send_all(&mut stream, ack.as_bytes()) {
+            if let Err(e) = send_all(&mut stream, ack.as_bytes()).await {
                 eprintln!("[error] ACK не отправлен: {}", e);
             }
         }
@@ -90,19 +84,21 @@ fn handle_client(mut stream: TcpStream) {
     }
 
     println!("[-] Отключился: {}", peer);
-    io::stdout().flush().unwrap();
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let addr = "127.0.0.1:7878";
-    let listener = TcpListener::bind(addr).expect("Не удалось занять порт 7878");
+    let listener = TcpListener::bind(addr).await.expect("Не удалось занять порт 7878");
 
-    println!("TCP-сервер запущен");
+    println!("TCP-сервер запущен (tokio)");
     println!("Слушаю на {}", addr);
 
-    for incoming in listener.incoming() {
-        match incoming {
-            Ok(stream) => { thread::spawn(move || handle_client(stream)); }
+    loop {
+        match listener.accept().await {
+            Ok((stream, _)) => {
+                tokio::spawn(handle_client(stream));
+            }
             Err(e) => eprintln!("[error] {}", e),
         }
     }
