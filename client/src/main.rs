@@ -1,17 +1,11 @@
 
 fn main() {
 
-
-    let mut i = 0;
-    loop {
-        i += 1;
-        if i == 5 { break; }
+    for i in 0..5 {         // 0,1,2,3,4
+        println!("{}", i);
     }
-
-    let mut n = 0;
-    while n < 5 {
-        println!("{}", n);
-        n += 1;
+    for i in 0..=5 {        // 0,1,2,3,4,5
+        println!("{}", i);
     }
 
     
