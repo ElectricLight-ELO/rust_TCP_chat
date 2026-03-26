@@ -1,0 +1,28 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Run Client",
+            "type": "lldb",
+            "request": "launch",
+            "program": "${workspaceRoot}/client/target/debug/client",
+            "args": [],
+            "cwd": "${workspaceRoot}/client"
+        },
+        {
+            "name": "Run Server",
+            "type": "lldb",
+            "request": "launch",
+            "program": "${workspaceRoot}/server/target/debug/server",
+            "args": [],
+            "cwd": "${workspaceRoot}/server"
+        }
+    ],
+    "compounds": [
+        {
+            "name": "Server + Client",
+            "configurations": ["Run Server", "Run Client"],
+            "stopAll": true
+        }
+    ]
+}
