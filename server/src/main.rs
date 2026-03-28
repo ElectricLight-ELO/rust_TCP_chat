@@ -1,22 +1,35 @@
+use std::{collections::HashMap, sync::OnceLock, time::SystemTime};
 use tokio::io::{self, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::Mutex;
 
 const CHUNK_SIZE: usize = 1024;
+
+#[derive(Debug, Clone)]
+struct User {
+    nickname: String,
+    last_connected_at: SystemTime,
+}
+
+static USERS: OnceLock<Mutex<HashMap<String, User>>> = OnceLock::new();
+
+fn users() -> &'static Mutex<HashMap<String, User>> {
+    USERS.get_or_init(|| Mutex::new(HashMap::new()))
+}
 
 /// Читает одно length-prefixed сообщение.
 /// Возвращает None если клиент закрыл соединение (EOF при чтении длины).
 async fn read_message(stream: &mut TcpStream) -> io::Result<Option<String>> {
-    // 1. Читаем 4 байта длины (big-endian)
     let mut len_buf = [0u8; 4];
     match stream.read_exact(&mut len_buf).await {
         Ok(_) => {}
         Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
         Err(e) => return Err(e),
     }
+
     let data_length = u32::from_be_bytes(len_buf) as usize;
     println!("  [server] ожидаю {} байт", data_length);
 
-    // 2. Читаем payload чанками
     let mut buffer = vec![0u8; data_length];
     let mut bytes_read = 0usize;
     let mut chunk_index = 0usize;
@@ -39,10 +52,8 @@ async fn read_message(stream: &mut TcpStream) -> io::Result<Option<String>> {
 async fn send_message(stream: &mut TcpStream, data: &[u8]) -> io::Result<()> {
     let data_length = data.len();
 
-    // 1. Отправляем длину (4 байта, big-endian)
     stream.write_all(&(data_length as u32).to_be_bytes()).await?;
 
-    // 2. Отправляем payload чанками
     let mut bytes_sent = 0usize;
     let mut chunk_index = 0usize;
 
@@ -87,30 +98,56 @@ async fn handle_client(mut stream: TcpStream) {
         }
     };
 
+    {
+        let mut users = users().lock().await;
+
+        // Проверяем, что ник не занят другим пользователем
+        if users.contains_key(&nickname) {
+            eprintln!("[server] ник \"{}\" уже занят, отклоняем {}", nickname, peer);
+            let _ = send_message(&mut stream, "Ошибка: такой ник уже занят".as_bytes()).await;
+            return;
+        }
+
+        let user = User {
+            nickname: nickname.clone(),
+            last_connected_at: SystemTime::now(),
+        };
+        users.insert(nickname.clone(), user);
+        let u = &users[&nickname];
+        println!(
+            "[server] пользователь сохранён: {} ({:?})",
+            u.nickname, u.last_connected_at
+        );
+    }
+
     loop {
         match read_message(&mut stream).await {
             Ok(Some(msg)) => {
                 println!("  [{} / {}] > {}", peer, nickname, msg);
 
                 let ack = format!("OK: {} отправил {} байт", nickname, msg.len());
-                
                 if let Err(e) = send_message(&mut stream, ack.as_bytes()).await {
-                    
-                    eprintln!("[error] Не удалось отправить ACK клиенту {} ({}): {}", peer, nickname, e);
+                    eprintln!(
+                        "[ошибка] Не удалось отправить ACK клиенту {} ({}): {}",
+                        peer, nickname, e
+                    );
                     break;
                 }
             }
             Ok(None) => {
-                // Клиент закрыл соединение
                 println!("[-] Клиент {} ({}) закрыл соединение", peer, nickname);
                 break;
             }
             Err(e) => {
-                eprintln!("[error] Ошибка чтения от {} ({}): {}", peer, nickname, e);
+                eprintln!("[ошибка] Ошибка чтения от {} ({}): {}", peer, nickname, e);
                 break;
             }
         }
     }
+
+    // Удаляем пользователя из реестра после отключения — ник снова становится свободным
+    users().lock().await.remove(&nickname);
+    println!("[server] пользователь {} удалён из реестра", nickname);
 }
 
 #[tokio::main]
