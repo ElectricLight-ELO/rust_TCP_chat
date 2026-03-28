@@ -73,7 +73,17 @@ async fn send_message<W: AsyncWriteExt + Unpin>(writer: &mut W, data: &[u8]) -> 
     Ok(())
 }
 
-
+/// Рассылает сообщение всем авторизованным пользователям кроме отправителя.
+async fn broadcast(sender_nickname: &str, data: &[u8]) {
+    let mut users = users().lock().await;
+    for (_, user) in users.iter_mut() {
+        if user.authorized && user.nickname != sender_nickname {
+            if let Some(writer) = user.writer.as_mut() {
+                let _ = send_message(writer, data).await;
+            }
+        }
+    }
+}
 
 /// Обрабатывает клиента: сначала читает nickname, затем сообщения в цикле.
 /// Цикл завершается когда клиент закрывает соединение.
