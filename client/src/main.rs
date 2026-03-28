@@ -105,8 +105,21 @@ async fn main() {
 
     // Сразу после подключения отправляем nickname серверу
     if let Err(e) = send_message(&mut stream, nickname.as_bytes()).await {
-        eprintln!("[error] Не удалось отправить nickname: {}", e);
+        eprintln!("[ошибка] Сервер недоступен при отправке nickname: {}", e);
         return;
+    }
+
+    // Читаем ответ сервера на авторизацию (может быть ошибка занятого ника)
+    match read_message(&mut stream).await {
+        Ok(ack) if ack.starts_with("Ошибка") => {
+            eprintln!("[сервер] {}", ack);
+            return;
+        }
+        Ok(ack) => println!("[сервер] {}\n", ack),
+        Err(_) => {
+            eprintln!("[ошибка] Сервер недоступен или закрыл соединение.");
+            return;
+        }
     }
 
     // Цикл отправки сообщений по одному соединению
@@ -121,7 +134,7 @@ async fn main() {
                 break;
             }
             Err(e) => {
-                eprintln!("[error] {}", e);
+                eprintln!("[ошибка] {}", e);
                 break;
             }
         };
@@ -137,16 +150,16 @@ async fn main() {
         }
 
         // Отправляем сообщение
-        if let Err(e) = send_message(&mut stream, message.as_bytes()).await {
-            eprintln!("[error] Ошибка отправки: {}", e);
+        if let Err(_) = send_message(&mut stream, message.as_bytes()).await {
+            eprintln!("[ошибка] Сервер недоступен, соединение разорвано.");
             break;
         }
 
         // Ждём ACK от сервера
         match read_message(&mut stream).await {
-            Ok(ack) => println!("[client] Сервер: \"{}\"\n", ack),
-            Err(e) => {
-                eprintln!("[error] Ошибка получения ACK: {}", e);
+            Ok(ack) => println!("[сервер] {}\n", ack),
+            Err(_) => {
+                eprintln!("[ошибка] Сервер недоступен, соединение разорвано.");
                 break;
             }
         }

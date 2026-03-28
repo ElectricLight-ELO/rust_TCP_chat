@@ -123,6 +123,13 @@ async fn handle_client(mut stream: TcpStream) {
             "[server] пользователь сохранён: {} ({:?})",
             u.nickname, u.last_connected_at
         );
+
+        // Отправляем клиенту подтверждение успешной авторизации
+        drop(users);
+    }
+    if let Err(e) = send_message(&mut stream, format!("Добро пожаловать, {}!", nickname).as_bytes()).await {
+        eprintln!("[ошибка] Не удалось отправить приветствие {}: {}", nickname, e);
+        return;
     }
 
     loop {
