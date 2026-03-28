@@ -9,6 +9,7 @@ const CHUNK_SIZE: usize = 1024;
 struct User {
     nickname: String,
     last_connected_at: SystemTime,
+    authorized: bool,
 }
 
 static USERS: OnceLock<Mutex<HashMap<String, User>>> = OnceLock::new();
@@ -101,16 +102,20 @@ async fn handle_client(mut stream: TcpStream) {
     {
         let mut users = users().lock().await;
 
-        // Проверяем, что ник не занят другим пользователем
-        if users.contains_key(&nickname) {
-            eprintln!("[server] ник \"{}\" уже занят, отклоняем {}", nickname, peer);
-            let _ = send_message(&mut stream, "Ошибка: такой ник уже занят".as_bytes()).await;
-            return;
+        // Проверяем, что ник не занят активным пользователем
+        if let Some(u) = users.get(&nickname) {
+            if u.authorized {
+                eprintln!("[server] ник \"{}\" уже занят, отклоняем {}", nickname, peer);
+                let _ = send_message(&mut stream, "Ошибка: такой ник уже занят".as_bytes()).await;
+                return;
+            }
         }
 
+        // Сохраняем пользователя как авторизованного
         let user = User {
             nickname: nickname.clone(),
             last_connected_at: SystemTime::now(),
+            authorized: true,
         };
         users.insert(nickname.clone(), user);
         let u = &users[&nickname];
@@ -145,9 +150,11 @@ async fn handle_client(mut stream: TcpStream) {
         }
     }
 
-    // Удаляем пользователя из реестра после отключения — ник снова становится свободным
-    users().lock().await.remove(&nickname);
-    println!("[server] пользователь {} удалён из реестра", nickname);
+    // При отключении снимаем флаг авторизации — ник снова становится свободным
+    if let Some(u) = users().lock().await.get_mut(&nickname) {
+        u.authorized = false;
+    }
+    println!("[server] пользователь {} отключился, ник освобождён", nickname);
 }
 
 #[tokio::main]
