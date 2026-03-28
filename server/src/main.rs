@@ -1,15 +1,15 @@
 use std::{collections::HashMap, sync::OnceLock, time::SystemTime};
 use tokio::io::{self, AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{tcp::OwnedWriteHalf, TcpListener, TcpStream};
 use tokio::sync::Mutex;
 
 const CHUNK_SIZE: usize = 1024;
 
-#[derive(Debug, Clone)]
 struct User {
     nickname: String,
     last_connected_at: SystemTime,
     authorized: bool,
+    writer: Option<OwnedWriteHalf>,
 }
 
 static USERS: OnceLock<Mutex<HashMap<String, User>>> = OnceLock::new();
@@ -20,7 +20,7 @@ fn users() -> &'static Mutex<HashMap<String, User>> {
 
 /// Читает одно length-prefixed сообщение.
 /// Возвращает None если клиент закрыл соединение (EOF при чтении длины).
-async fn read_message(stream: &mut TcpStream) -> io::Result<Option<String>> {
+async fn read_message<R: AsyncReadExt + Unpin>(stream: &mut R) -> io::Result<Option<String>> {
     let mut len_buf = [0u8; 4];
     match stream.read_exact(&mut len_buf).await {
         Ok(_) => {}
@@ -50,18 +50,18 @@ async fn read_message(stream: &mut TcpStream) -> io::Result<Option<String>> {
 }
 
 /// Отправляет одно length-prefixed сообщение.
-async fn send_message(stream: &mut TcpStream, data: &[u8]) -> io::Result<()> {
+async fn send_message<W: AsyncWriteExt + Unpin>(writer: &mut W, data: &[u8]) -> io::Result<()> {
     let data_length = data.len();
 
-    stream.write_all(&(data_length as u32).to_be_bytes()).await?;
+    writer.write_all(&(data_length as u32).to_be_bytes()).await?;
 
     let mut bytes_sent = 0usize;
     let mut chunk_index = 0usize;
 
     while bytes_sent < data_length {
         let current_chunk = (data_length - bytes_sent).min(CHUNK_SIZE);
-        stream.write_all(&data[bytes_sent..bytes_sent + current_chunk]).await?;
-        stream.flush().await?;
+        writer.write_all(&data[bytes_sent..bytes_sent + current_chunk]).await?;
+        writer.flush().await?;
         bytes_sent += current_chunk;
         chunk_index += 1;
         println!(
@@ -73,17 +73,22 @@ async fn send_message(stream: &mut TcpStream, data: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
+
+
 /// Обрабатывает клиента: сначала читает nickname, затем сообщения в цикле.
 /// Цикл завершается когда клиент закрывает соединение.
-async fn handle_client(mut stream: TcpStream) {
+async fn handle_client(stream: TcpStream) {
     let peer = stream.peer_addr().unwrap();
     println!("\n[+] Подключился: {}", peer);
 
-    let nickname = match read_message(&mut stream).await {
+    // Разделяем стрим на чтение и запись
+    let (mut reader, mut writer) = stream.into_split();
+
+    let nickname = match read_message(&mut reader).await {
         Ok(Some(name)) => {
             let name = name.trim().to_string();
             if name.is_empty() {
-                eprintln!("[error] Клиент {} отправил пустой nickname", peer);
+                eprintln!("[ошибка] Клиент {} отправил пустой nickname", peer);
                 return;
             }
             println!("[+] {} представился как {}", peer, name);
@@ -94,7 +99,7 @@ async fn handle_client(mut stream: TcpStream) {
             return;
         }
         Err(e) => {
-            eprintln!("[error] Не удалось прочитать nickname от {}: {}", peer, e);
+            eprintln!("[ошибка] Не удалось прочитать nickname от {}: {}", peer, e);
             return;
         }
     };
@@ -106,45 +111,46 @@ async fn handle_client(mut stream: TcpStream) {
         if let Some(u) = users.get(&nickname) {
             if u.authorized {
                 eprintln!("[server] ник \"{}\" уже занят, отклоняем {}", nickname, peer);
-                let _ = send_message(&mut stream, "Ошибка: такой ник уже занят".as_bytes()).await;
+                let _ = send_message(&mut writer, "Ошибка: такой ник уже занят".as_bytes()).await;
                 return;
             }
         }
 
-        // Сохраняем пользователя как авторизованного
+        // Сохраняем пользователя как авторизованного со stream writer
         let user = User {
             nickname: nickname.clone(),
             last_connected_at: SystemTime::now(),
             authorized: true,
+            writer: Some(writer),
         };
         users.insert(nickname.clone(), user);
-        let u = &users[&nickname];
         println!(
             "[server] пользователь сохранён: {} ({:?})",
-            u.nickname, u.last_connected_at
+            nickname, users[&nickname].last_connected_at
         );
-
-        // Отправляем клиенту подтверждение успешной авторизации
-        drop(users);
     }
-    if let Err(e) = send_message(&mut stream, format!("Добро пожаловать, {}!", nickname).as_bytes()).await {
-        eprintln!("[ошибка] Не удалось отправить приветствие {}: {}", nickname, e);
-        return;
+
+    // Отправляем клиенту подтверждение успешной авторизации
+    {
+        let mut users = users().lock().await;
+        if let Some(user) = users.get_mut(&nickname) {
+            if let Some(writer) = user.writer.as_mut() {
+                if let Err(e) = send_message(writer, format!("Добро пожаловать, {}!", nickname).as_bytes()).await {
+                    eprintln!("[ошибка] Не удалось отправить приветствие {}: {}", nickname, e);
+                    return;
+                }
+            }
+        }
     }
 
     loop {
-        match read_message(&mut stream).await {
+        match read_message(&mut reader).await {
             Ok(Some(msg)) => {
                 println!("  [{} / {}] > {}", peer, nickname, msg);
 
-                let ack = format!("OK: {} отправил {} байт", nickname, msg.len());
-                if let Err(e) = send_message(&mut stream, ack.as_bytes()).await {
-                    eprintln!(
-                        "[ошибка] Не удалось отправить ACK клиенту {} ({}): {}",
-                        peer, nickname, e
-                    );
-                    break;
-                }
+                // Рассылаем сообщение всем остальным пользователям
+                let broadcast_msg = format!("[{}] {}", nickname, msg);
+                broadcast(&nickname, broadcast_msg.as_bytes()).await;
             }
             Ok(None) => {
                 println!("[-] Клиент {} ({}) закрыл соединение", peer, nickname);
@@ -157,9 +163,10 @@ async fn handle_client(mut stream: TcpStream) {
         }
     }
 
-    // При отключении снимаем флаг авторизации — ник снова становится свободным
+    // При отключении снимаем флаг авторизации и обнуляем writer — ник снова становится свободным
     if let Some(u) = users().lock().await.get_mut(&nickname) {
         u.authorized = false;
+        u.writer = None;
     }
     println!("[server] пользователь {} отключился, ник освобождён", nickname);
 }
@@ -177,7 +184,7 @@ async fn main() {
             Ok((stream, _)) => {
                 tokio::spawn(handle_client(stream));
             }
-            Err(e) => eprintln!("[error] accept: {}", e),
+            Err(e) => eprintln!("[ошибка] accept: {}", e),
         }
     }
 }
