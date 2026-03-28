@@ -103,6 +103,12 @@ async fn main() {
         }
     };
 
+    // Сразу после подключения отправляем nickname серверу
+    if let Err(e) = send_message(&mut stream, nickname.as_bytes()).await {
+        eprintln!("[error] Не удалось отправить nickname: {}", e);
+        return;
+    }
+
     // Цикл отправки сообщений по одному соединению
     loop {
         print!("[{}] Введите сообщение (или 'exit'): ", nickname);

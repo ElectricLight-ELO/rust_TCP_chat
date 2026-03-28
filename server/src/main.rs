@@ -61,30 +61,52 @@ async fn send_message(stream: &mut TcpStream, data: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
-/// Обрабатывает клиента: читает сообщения в цикле, на каждое отвечает ACK.
+/// Обрабатывает клиента: сначала читает nickname, затем сообщения в цикле.
 /// Цикл завершается когда клиент закрывает соединение.
 async fn handle_client(mut stream: TcpStream) {
     let peer = stream.peer_addr().unwrap();
     println!("\n[+] Подключился: {}", peer);
 
+    let nickname = match read_message(&mut stream).await {
+        Ok(Some(name)) => {
+            let name = name.trim().to_string();
+            if name.is_empty() {
+                eprintln!("[error] Клиент {} отправил пустой nickname", peer);
+                return;
+            }
+            println!("[+] {} представился как {}", peer, name);
+            name
+        }
+        Ok(None) => {
+            println!("[-] Клиент {} отключился до отправки nickname", peer);
+            return;
+        }
+        Err(e) => {
+            eprintln!("[error] Не удалось прочитать nickname от {}: {}", peer, e);
+            return;
+        }
+    };
+
     loop {
         match read_message(&mut stream).await {
             Ok(Some(msg)) => {
-                println!("  [{}] > {}", peer, msg);
+                println!("  [{} / {}] > {}", peer, nickname, msg);
 
-                let ack = format!("OK: получено {} байт", msg.len());
+                let ack = format!("OK: {} отправил {} байт", nickname, msg.len());
+                
                 if let Err(e) = send_message(&mut stream, ack.as_bytes()).await {
-                    eprintln!("[error] Не удалось отправить ACK клиенту {}: {}", peer, e);
+                    
+                    eprintln!("[error] Не удалось отправить ACK клиенту {} ({}): {}", peer, nickname, e);
                     break;
                 }
             }
             Ok(None) => {
                 // Клиент закрыл соединение
-                println!("[-] Клиент {} закрыл соединение", peer);
+                println!("[-] Клиент {} ({}) закрыл соединение", peer, nickname);
                 break;
             }
             Err(e) => {
-                eprintln!("[error] Ошибка чтения от {}: {}", peer, e);
+                eprintln!("[error] Ошибка чтения от {} ({}): {}", peer, nickname, e);
                 break;
             }
         }
