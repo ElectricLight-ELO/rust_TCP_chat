@@ -4,6 +4,7 @@ use tokio::net::TcpStream;
 
 const CHUNK_SIZE: usize = 1024;
 
+
 /// Отправляет одно length-prefixed сообщение.
 async fn send_message(stream: &mut TcpStream, data: &[u8]) -> io::Result<()> {
     let data_length = data.len();
@@ -62,10 +63,38 @@ async fn main() {
 
     println!("Rust TCP-клиент (tokio)");
 
-    // Устанавливаем соединение один раз
+    let stdin = tokio::io::stdin();
+    let mut reader = BufReader::new(stdin).lines();
+
+    let nickname = loop {
+        print!("Введите nickname: ");
+        std::io::stdout().flush().unwrap();
+
+        let line = match reader.next_line().await {
+            Ok(Some(l)) => l,
+            Ok(None) => {
+                println!("EOF — выход.");
+                return;
+            }
+            Err(e) => {
+                eprintln!("[error] {}", e);
+                return;
+            }
+        };
+
+        let nickname = line.trim().to_string();
+        if nickname.is_empty() {
+            println!("Nickname не может быть пустым.");
+            continue;
+        }
+
+        break nickname;
+    };
+
+    // Устанавливаем соединение только после ввода nickname
     let mut stream = match TcpStream::connect(addr).await {
         Ok(s) => {
-            println!("Подключён к {}\n", addr);
+            println!("Подключён к {} как {}\n", addr, nickname);
             s
         }
         Err(e) => {
@@ -74,12 +103,9 @@ async fn main() {
         }
     };
 
-    let stdin = tokio::io::stdin();
-    let mut reader = BufReader::new(stdin).lines();
-
     // Цикл отправки сообщений по одному соединению
     loop {
-        print!("Введите сообщение (или 'exit'): ");
+        print!("[{}] Введите сообщение (или 'exit'): ", nickname);
         std::io::stdout().flush().unwrap();
 
         let line = match reader.next_line().await {
